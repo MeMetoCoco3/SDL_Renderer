@@ -38,6 +38,8 @@ main :: proc() {
 
 	// Iniciamos una ventana.
 	window := sdl.CreateWindow("Hello SDL", 1280, 780, {});assert(window != nil)
+	window_size: [2]i32
+	ok = sdl.GetWindowSize(window, &window_size.x, &window_size.y);assert(ok)
 
 	// Iniciamos un Device, y le pasamos el tipo de shaders que vamos a hacer.
 	// SPIRV es el tipo de shaders utilizado por vulkan.
@@ -66,13 +68,15 @@ main :: proc() {
 
 	// Load pixels
 	img_size: [2]i32
+	// stbi.set_flip_vertically_on_load(1) // Coordinates are fliped, we could also invert our UV coordinates
 	pixels := stbi.load(
-		"src/texture.png",
+		"src/colormap.png",
 		&img_size.x,
 		&img_size.y,
 		nil,
 		4,
 	);assert(pixels != nil);defer stbi.image_free(pixels)
+	log.info(pixels)
 	// pixels := sdli.Load("files/texture2.png");assert(pixels != nil)
 	// img_size.x, img_size.y = pixels.w, pixels.h
 	pixelx_byte_size := img_size.x * img_size.y * 4
@@ -96,6 +100,20 @@ main :: proc() {
 		color: sdl.FColor,
 		uv:    Vec2,
 	}
+	// We need to define the buffer where we will measure our depth for depth buffer
+	DEPTH_TEXTURE_FORMAT :: sdl.GPUTextureFormat.D32_FLOAT
+	depth_texture := sdl.CreateGPUTexture(
+		gpu,
+		{
+			format = DEPTH_TEXTURE_FORMAT,
+			usage = {.DEPTH_STENCIL_TARGET},
+			width = u32(window_size.x),
+			height = u32(window_size.y),
+			layer_count_or_depth = 1,
+			num_levels = 1,
+		},
+	)
+
 
 	obj_data := obj_load("assets/models/ship-pirate-large.obj")
 
@@ -105,9 +123,10 @@ main :: proc() {
 	indices := make([]u16, len(obj_data.faces))
 
 	for face, i in obj_data.faces {
+		uv := obj_data.uvs[face.uv]
 		vertices[i] = {
 			pos   = obj_data.positions[face.pos],
-			uv    = obj_data.uvs[face.uv],
+			uv    = {uv.x, 1 - uv.y},
 			color = WHITE,
 		}
 		indices[i] = u16(i)
@@ -211,12 +230,19 @@ main :: proc() {
 			num_vertex_attributes = u32(len(vertex_attributes)),
 			vertex_attributes = raw_data(vertex_attributes),
 		},
+		depth_stencil_state = {
+			enable_depth_test = true,
+			enable_depth_write = true,
+			compare_op = .LESS,
+		},
 		// Creamos GPUGraphicsPipelineTargetInfo que define el color de nuestros pixeles.
 		target_info = {
 			num_color_targets = 1,
 			color_target_descriptions = &(sdl.GPUColorTargetDescription {
 					format = sdl.GetGPUSwapchainTextureFormat(gpu, window),
 				}),
+			has_depth_stencil_target = true,
+			depth_stencil_format = DEPTH_TEXTURE_FORMAT,
 		},
 	},
 	)
@@ -226,8 +252,6 @@ main :: proc() {
 
 
 	// Creamos una matriz de projeccion.
-	window_size: [2]i32
-	ok = sdl.GetWindowSize(window, &window_size.x, &window_size.y);assert(ok)
 	proj_mat := linalg.matrix4_perspective_f32(
 		70,
 		f32(window_size.x) / f32(window_size.y),
@@ -295,8 +319,17 @@ main :: proc() {
 				clear_color = {0, 0.2, 0.5, 1},
 				store_op    = .STORE,
 			}
+
+
+			depth_target_info := sdl.GPUDepthStencilTargetInfo {
+				texture     = depth_texture,
+				load_op     = .CLEAR,
+				clear_depth = 1,
+				store_op    = .DONT_CARE,
+			}
+
 			// Empezamos el proceso de pasar datos a nuestra GPU, debemos bindearlo a la pipeline.
-			render_pass := sdl.BeginGPURenderPass(cmd_buf, &color_target, 1, nil)
+			render_pass := sdl.BeginGPURenderPass(cmd_buf, &color_target, 1, &depth_target_info)
 
 			sdl.BindGPUGraphicsPipeline(render_pass, pipeline)
 			sdl.BindGPUVertexBuffers(

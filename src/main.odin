@@ -3,6 +3,8 @@ package main
 import "base:runtime"
 import "core:log"
 import "core:math/linalg"
+
+import "core:math/"
 import "core:mem"
 import "core:strings"
 import sdl "vendor:sdl3"
@@ -33,11 +35,27 @@ window: ^sdl.Window
 pipeline: ^sdl.GPUGraphicsPipeline
 depth_texture: ^sdl.GPUTexture
 window_size: [2]i32
+sampelr: ^sdl.GPUSampler
 
+camera: struct {
+	position: Vec3,
+	target:   Vec3,
+}
+
+look: struct {
+	yaw:   f32,
+	pitch: f32,
+}
+
+key_down: #sparse[sdl.Scancode]bool
+mouse_move: Vec2
 
 // We need to define the buffer where we will measure our depth for depth buffer
 DEPTH_TEXTURE_FORMAT :: sdl.GPUTextureFormat.D32_FLOAT
 WHITE :: sdl.FColor{1, 1, 1, 1}
+EYE_HEIGHT :: 1
+MOVE_SPEED :: 4
+MOUSE_SENSITIVITY :: 0.5
 
 init :: proc() {
 	sdl.SetLogPriorities(.VERBOSE)
@@ -59,14 +77,14 @@ init :: proc() {
 
 	// Iniciamos una ventana.
 	window = sdl.CreateWindow("Hello SDL", 1280, 780, {});assert(window != nil)
-	// Asignamos una ventana al device.
-	ok = sdl.ClaimWindowForGPUDevice(gpu, window);assert(ok)
-	ok = sdl.GetWindowSize(window, &window_size.x, &window_size.y);assert(ok)
+	ok = sdl.GetWindowSize(window, &window_size.x, &window_size.y)
+
 	// Iniciamos un Device, y le pasamos el tipo de shaders que vamos a hacer.
 	// SPIRV es el tipo de shaders utilizado por vulkan.
-	gpu = sdl.CreateGPUDevice({.SPIRV}, true, nil)
-	assert(gpu != nil)
+	gpu = sdl.CreateGPUDevice({.SPIRV}, true, nil);assert(gpu != nil)
 
+	// Asignamos una ventana al device.
+	ok = sdl.ClaimWindowForGPUDevice(gpu, window)
 
 	depth_texture = sdl.CreateGPUTexture(
 		gpu,
@@ -79,6 +97,15 @@ init :: proc() {
 			num_levels = 1,
 		},
 	)
+
+
+	camera = {
+		position = {0, EYE_HEIGHT, 10},
+		target   = {0, EYE_HEIGHT, 0},
+	}
+
+	ok = sdl.SetWindowRelativeMouseMode(window, true);assert(ok)
+
 }
 
 setup_pipeline :: proc() {
@@ -130,6 +157,8 @@ setup_pipeline :: proc() {
 				enable_depth_write = true,
 				compare_op = .LESS,
 			},
+			// rasterizer_state = {cull_mode = .BACK, fill_mode = .LINE},
+			rasterizer_state = {cull_mode = .BACK},
 			// Creamos GPUGraphicsPipelineTargetInfo que define el color de nuestros pixeles.
 			target_info = {
 				num_color_targets = 1,
@@ -269,6 +298,34 @@ load_model :: proc(texture_path, model_path: string) -> Model {
 	}
 }
 
+update_camera :: proc(dt: f32) {
+	move_input: Vec2
+	if key_down[.W] do move_input.y = 1
+	if key_down[.S] do move_input.y = -1
+	if key_down[.D] do move_input.x = 1
+	if key_down[.A] do move_input.x = -1
+
+	look_input := mouse_move * MOUSE_SENSITIVITY
+	look.yaw = math.wrap(look.yaw + look_input.x, 360)
+	look.pitch = math.clamp(look.pitch + look_input.y, -89, 89)
+
+	look_mat := linalg.matrix3_from_yaw_pitch_roll_f32(
+		linalg.to_radians(look.yaw),
+		linalg.to_radians(look.pitch),
+		0,
+	)
+
+	forward := Vec3{0, 0, -1} * look_mat
+	right := Vec3{1, 0, 0} * look_mat
+	move_dir := forward * move_input.y + right * move_input.x
+	move_dir.y = 0
+
+	motion := linalg.normalize0(move_dir) * MOVE_SPEED * dt
+
+	camera.position += motion
+	camera.target = camera.position + forward
+
+}
 
 main :: proc() {
 
@@ -303,6 +360,9 @@ main :: proc() {
 
 	main_loop: for {
 		free_all(context.temp_allocator)
+
+		mouse_move = {0, 0}
+
 		current_tick := sdl.GetTicks()
 		delta_time := f32(current_tick - last_tick) / 1000
 		last_tick = current_tick
@@ -315,6 +375,11 @@ main :: proc() {
 				break main_loop
 			case .KEY_DOWN:
 				if event.key.scancode == .ESCAPE || event.key.scancode == .Q do break main_loop
+				key_down[event.key.scancode] = true
+			case .KEY_UP:
+				key_down[event.key.scancode] = false
+			case .MOUSE_MOTION:
+				mouse_move += {event.motion.xrel, event.motion.yrel}
 			}
 		}
 
@@ -336,11 +401,17 @@ main :: proc() {
 		);assert(ok)
 
 		rotation += ROTATION_SPEED * delta_time
+		update_camera(delta_time)
+
+		up_vector: Vec3 = {0, 1, 0}
+		view_mat := linalg.matrix4_look_at_f32(camera.position, camera.target, up_vector)
 		model_mat :=
-			linalg.matrix4_translate_f32({0, -4, -13}) *
-			linalg.matrix4_rotate_f32(rotation, {0, 1, 0})
+			linalg.matrix4_translate_f32({0, 0, 0}) *
+			linalg.matrix4_rotate_f32(rotation, up_vector)
+
+
 		ubo := UBO {
-			mvp = proj_mat * model_mat,
+			mvp = proj_mat * view_mat * model_mat,
 		}
 
 		// Seria null si la ventana estubiera minimizada.

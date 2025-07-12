@@ -2,10 +2,11 @@ package main
 
 import "base:runtime"
 import "core:log"
-import "core:math/linalg"
-
 import "core:math/"
+import "core:math/linalg"
 import "core:mem"
+import "core:os"
+import "core:path/filepath"
 import "core:strings"
 import sdl "vendor:sdl3"
 import stbi "vendor:stb/image"
@@ -27,15 +28,12 @@ Model :: struct {
 
 default_context: runtime.Context
 
-frag_shader_code := #load("shader.spv.frag")
-vert_shader_code := #load("shader.spv.vert")
-
 gpu: ^sdl.GPUDevice
 window: ^sdl.Window
 pipeline: ^sdl.GPUGraphicsPipeline
 depth_texture: ^sdl.GPUTexture
 window_size: [2]i32
-sampelr: ^sdl.GPUSampler
+sampler: ^sdl.GPUSampler
 
 camera: struct {
 	position: Vec3,
@@ -56,6 +54,8 @@ WHITE :: sdl.FColor{1, 1, 1, 1}
 EYE_HEIGHT :: 1
 MOVE_SPEED :: 4
 MOUSE_SENSITIVITY :: 0.5
+ASSETS_PATH :: "assets"
+
 
 init :: proc() {
 	sdl.SetLogPriorities(.VERBOSE)
@@ -110,18 +110,10 @@ init :: proc() {
 
 setup_pipeline :: proc() {
 	// Asignamos los shaders a la GPU.
-	vertex_shader := load_shader(
-		gpu,
-		vert_shader_code,
-		.VERTEX,
-		num_uniform_buffers = 1,
-		num_samplers = 0,
-	)
-
+	vertex_shader := load_shader(gpu, "shader.vert", num_uniform_buffers = 1, num_samplers = 0)
 	fragment_shader := load_shader(
 		gpu,
-		frag_shader_code,
-		.FRAGMENT,
+		"shader.frag",
 		num_uniform_buffers = 0,
 		num_samplers = 1, // Esta linea me ha matado, por su culpa la textura no renderizaba.
 	)
@@ -170,14 +162,21 @@ setup_pipeline :: proc() {
 			},
 		},
 	)
+
+	log.debug(sdl.GetError())
+	assert(pipeline != nil)
 	// Una vez hayamos hecho el binding con la pipeline, podemos liberarlos.
 	sdl.ReleaseGPUShader(gpu, vertex_shader)
 	sdl.ReleaseGPUShader(gpu, fragment_shader)
 
+	sampler = sdl.CreateGPUSampler(gpu, {})
 }
 
 
-load_model :: proc(texture_path, model_path: string) -> Model {
+load_model :: proc(texture_file, model_file: string) -> Model {
+	texture_path := filepath.join({ASSETS_PATH, "textures", texture_file}, context.temp_allocator)
+	model_path := filepath.join({ASSETS_PATH, "models", model_file}, context.temp_allocator)
+
 	// Load pixels
 	img_size: [2]i32
 	// stbi.set_flip_vertically_on_load(1) // Coordinates are fliped, we could also invert our UV coordinates
@@ -188,7 +187,6 @@ load_model :: proc(texture_path, model_path: string) -> Model {
 		nil,
 		4,
 	);assert(pixels != nil);defer stbi.image_free(pixels)
-	log.info(pixels)
 	pixelx_byte_size := img_size.x * img_size.y * 4
 
 	// Create texture on the gpu
@@ -335,7 +333,7 @@ main :: proc() {
 
 	init()
 	setup_pipeline()
-	model := load_model("src/colormap.png", "assets/models/ship-pirate-large.obj")
+	model := load_model("colormap.png", "ship-pirate-large.obj")
 
 	// Create a sampler for shader
 	sampler := sdl.CreateGPUSampler(gpu, {})
@@ -463,11 +461,27 @@ main :: proc() {
 
 load_shader :: proc(
 	device: ^sdl.GPUDevice,
-	code: []u8,
-	stage: sdl.GPUShaderStage,
+	shader_name: string,
 	num_uniform_buffers: u32,
 	num_samplers: u32,
 ) -> ^sdl.GPUShader {
+
+	stage: sdl.GPUShaderStage
+	switch filepath.ext(shader_name) {
+	case ".vert":
+		stage = .VERTEX
+
+	case ".frag":
+		stage = .FRAGMENT
+	}
+
+	file_path := filepath.join(
+		{ASSETS_PATH, "shaders", "out", shader_name},
+		context.temp_allocator,
+	)
+	log.debug(stage)
+	file_name := strings.concatenate({file_path, ".spv"}, context.temp_allocator)
+	code, ok := os.read_entire_file_from_filename(file_name, context.temp_allocator);assert(ok)
 	return sdl.CreateGPUShader(
 		device,
 		{

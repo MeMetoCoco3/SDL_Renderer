@@ -1,6 +1,7 @@
 package main
 
 import "base:runtime"
+import "core:encoding/json"
 import "core:log"
 import "core:math/"
 import "core:math/linalg"
@@ -49,7 +50,7 @@ key_down: #sparse[sdl.Scancode]bool
 mouse_move: Vec2
 
 // We need to define the buffer where we will measure our depth for depth buffer
-DEPTH_TEXTURE_FORMAT :: sdl.GPUTextureFormat.D32_FLOAT
+depth_texture_format := sdl.GPUTextureFormat.D16_UNORM
 WHITE :: sdl.FColor{1, 1, 1, 1}
 EYE_HEIGHT :: 1
 MOVE_SPEED :: 4
@@ -79,9 +80,19 @@ init :: proc() {
 	window = sdl.CreateWindow("Hello SDL", 1280, 780, {});assert(window != nil)
 	ok = sdl.GetWindowSize(window, &window_size.x, &window_size.y)
 
+	try_depth_format :: proc(format: sdl.GPUTextureFormat) {
+		if sdl.GPUTextureSupportsFormat(gpu, format, .D2, {.DEPTH_STENCIL_TARGET}) {
+			depth_texture_format = format
+		}
+	}
+
+	try_depth_format(sdl.GPUTextureFormat.D32_FLOAT)
+	try_depth_format(sdl.GPUTextureFormat.D24_UNORM)
+
+
 	// Iniciamos un Device, y le pasamos el tipo de shaders que vamos a hacer.
 	// SPIRV es el tipo de shaders utilizado por vulkan.
-	gpu = sdl.CreateGPUDevice({.SPIRV}, true, nil);assert(gpu != nil)
+	gpu = sdl.CreateGPUDevice({.SPIRV, .DXIL, .MSL}, true, nil);assert(gpu != nil)
 
 	// Asignamos una ventana al device.
 	ok = sdl.ClaimWindowForGPUDevice(gpu, window)
@@ -89,7 +100,7 @@ init :: proc() {
 	depth_texture = sdl.CreateGPUTexture(
 		gpu,
 		{
-			format = DEPTH_TEXTURE_FORMAT,
+			format = depth_texture_format,
 			usage = {.DEPTH_STENCIL_TARGET},
 			width = u32(window_size.x),
 			height = u32(window_size.y),
@@ -110,13 +121,8 @@ init :: proc() {
 
 setup_pipeline :: proc() {
 	// Asignamos los shaders a la GPU.
-	vertex_shader := load_shader(gpu, "shader.vert", num_uniform_buffers = 1, num_samplers = 0)
-	fragment_shader := load_shader(
-		gpu,
-		"shader.frag",
-		num_uniform_buffers = 0,
-		num_samplers = 1, // Esta linea me ha matado, por su culpa la textura no renderizaba.
-	)
+	vertex_shader := load_shader(gpu, "shader.vert")
+	fragment_shader := load_shader(gpu, "shader.frag")
 
 	// Describimos nuestros datos, en este caso decimos que vamos a pasar dos datos en esas localizaciones(las definimos en nuestros shaders), 
 	// tendran ese tamaño (3/4 floats), y tendran un offset de eso.
@@ -158,7 +164,7 @@ setup_pipeline :: proc() {
 						format = sdl.GetGPUSwapchainTextureFormat(gpu, window),
 					}),
 				has_depth_stencil_target = true,
-				depth_stencil_format = DEPTH_TEXTURE_FORMAT,
+				depth_stencil_format = depth_texture_format,
 			},
 		},
 	)
@@ -459,12 +465,7 @@ main :: proc() {
 }
 
 
-load_shader :: proc(
-	device: ^sdl.GPUDevice,
-	shader_name: string,
-	num_uniform_buffers: u32,
-	num_samplers: u32,
-) -> ^sdl.GPUShader {
+load_shader :: proc(device: ^sdl.GPUDevice, shader_name: string) -> ^sdl.GPUShader {
 
 	stage: sdl.GPUShaderStage
 	switch filepath.ext(shader_name) {
@@ -475,23 +476,70 @@ load_shader :: proc(
 		stage = .FRAGMENT
 	}
 
-	file_path := filepath.join(
+	format: sdl.GPUShaderFormatFlag
+	format_ext: string
+	entrypoint: cstring = "main"
+
+	supported_formats := sdl.GetGPUShaderFormats(device)
+	if .SPIRV in supported_formats {
+		format = .SPIRV // In my case, just .SPIRV is supported!
+		format_ext = ".spv"
+	} else if .MSL in supported_formats {
+		format = .MSL
+		format_ext = ".msl"
+		entrypoint = "main0"
+	} else if .DXIL in supported_formats {
+		format = .DXIL
+		format_ext = ".dxil"
+	} else {
+		log.panicf("No sopported shader format: {}", supported_formats)
+	}
+
+	shader_path := filepath.join(
 		{ASSETS_PATH, "shaders", "out", shader_name},
 		context.temp_allocator,
 	)
-	log.debug(stage)
-	file_name := strings.concatenate({file_path, ".spv"}, context.temp_allocator)
-	code, ok := os.read_entire_file_from_filename(file_name, context.temp_allocator);assert(ok)
+	shaderfile := strings.concatenate({shader_path, format_ext}, context.temp_allocator)
+	code, ok := os.read_entire_file_from_filename(shaderfile, context.temp_allocator);assert(ok)
+	info := load_shader_info(shader_path)
+
 	return sdl.CreateGPUShader(
 		device,
 		{
 			code_size = len(code),
 			code = raw_data(code),
-			entrypoint = "main",
-			format = {.SPIRV},
+			entrypoint = entrypoint,
+			format = {format},
 			stage = stage,
-			num_uniform_buffers = num_uniform_buffers,
-			num_samplers = num_samplers,
+			num_uniform_buffers = info.uniform_buffers,
+			num_samplers = info.samplers,
+			num_storage_buffers = info.storage_buffers,
+			num_storage_textures = info.storage_textures,
 		},
 	)
+}
+
+
+Shader_Info :: struct {
+	samplers:         u32,
+	storage_textures: u32,
+	storage_buffers:  u32,
+	uniform_buffers:  u32,
+}
+
+load_shader_info :: proc(shader_path: string) -> Shader_Info {
+	json_filename := strings.concatenate({shader_path, ".json"}, context.temp_allocator)
+	json_data, ok := os.read_entire_file_from_filename(
+		json_filename,
+		context.temp_allocator,
+	);assert(ok)
+
+	result: Shader_Info
+	err := json.unmarshal(
+		json_data,
+		&result,
+		allocator = context.temp_allocator,
+	);assert(err == nil)
+
+	return result
 }

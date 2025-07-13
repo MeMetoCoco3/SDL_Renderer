@@ -9,9 +9,11 @@ import "core:mem"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
+import im "shared:imgui"
+import im_sdl "shared:imgui/imgui_impl_sdl3"
+import im_sdlgpu "shared:imgui/imgui_impl_sdlgpu3"
 import sdl "vendor:sdl3"
 import stbi "vendor:stb/image"
-
 
 Vertex_Data :: struct {
 	pos:   Vec3,
@@ -117,7 +119,20 @@ init :: proc() {
 
 	ok = sdl.SetWindowRelativeMouseMode(window, true);assert(ok)
 
+	init_imgui()
+
+
 }
+
+init_imgui :: proc() {
+	im.CHECKVERSION()
+	im.CreateContext()
+	im_sdl.InitForSDLGPU(window)
+	im_sdlgpu.Init(
+		&{Device = gpu, ColorTargetFormat = sdl.GetGPUSwapchainTextureFormat(gpu, window)},
+	)
+}
+
 
 setup_pipeline :: proc() {
 	// Asignamos los shaders a la GPU.
@@ -355,12 +370,16 @@ main :: proc() {
 	ROTATION_SPEED := linalg.to_radians(f32(90))
 	rotation := f32(0)
 
+
 	UBO :: struct {
 		mvp: matrix[4, 4]f32,
 	}
 
 
 	last_tick := sdl.GetTicks()
+
+	rotate := true
+	clear_color := sdl.FColor{0, 0.2, 0.5, 1}
 
 	main_loop: for {
 		free_all(context.temp_allocator)
@@ -371,25 +390,55 @@ main :: proc() {
 		delta_time := f32(current_tick - last_tick) / 1000
 		last_tick = current_tick
 
+		ui_input_mode := sdl.GetWindowRelativeMouseMode(window)
+
 
 		event: sdl.Event
 		for sdl.PollEvent(&event) {
+			if ui_input_mode do im_sdl.ProcessEvent(&event)
+
 			#partial switch event.type {
 			case .QUIT:
 				break main_loop
 			case .KEY_DOWN:
-				if event.key.scancode == .ESCAPE || event.key.scancode == .Q do break main_loop
-				key_down[event.key.scancode] = true
+				if !ui_input_mode {
+					if event.key.scancode == .ESCAPE || event.key.scancode == .Q do break main_loop
+					key_down[event.key.scancode] = true
+				}
 			case .KEY_UP:
-				key_down[event.key.scancode] = false
+				if !ui_input_mode {
+					key_down[event.key.scancode] = false
+				}
+
 			case .MOUSE_MOTION:
-				mouse_move += {event.motion.xrel, event.motion.yrel}
+				if !ui_input_mode {
+					mouse_move += {event.motion.xrel, event.motion.yrel}
+				}
+
+			case .MOUSE_BUTTON_DOWN:
+				if event.button.button == 2 {
+					ui_input_mode = !ui_input_mode
+					_ = sdl.SetWindowRelativeMouseMode(window, ui_input_mode)
+				}
 			}
+
 		}
 
+		im_sdlgpu.NewFrame()
+		im_sdl.NewFrame()
+		im.NewFrame()
 
+		if im.Begin("Inspector") {
+			im.Checkbox("Rotate", &rotate)
+			im.ColorEdit3("Clear color", transmute(^[3]f32)&clear_color)
+		}
+
+		im.End()
 		// GAME STATE
-		// RENDER
+		if rotate do rotation += ROTATION_SPEED * delta_time
+		update_camera(delta_time)
+
+
 		// Creamos un buffer de comandos, encargado de enviar ordenes a la GPU.
 		cmd_buf := sdl.AcquireGPUCommandBuffer(gpu)
 
@@ -404,8 +453,6 @@ main :: proc() {
 			nil,
 		);assert(ok)
 
-		rotation += ROTATION_SPEED * delta_time
-		update_camera(delta_time)
 
 		up_vector: Vec3 = {0, 1, 0}
 		view_mat := linalg.matrix4_look_at_f32(camera.position, camera.target, up_vector)
@@ -418,12 +465,18 @@ main :: proc() {
 			mvp = proj_mat * view_mat * model_mat,
 		}
 
+
+		// RENDER
+		im.Render()
+		im_draw_data := im.GetDrawData()
+
 		// Seria null si la ventana estubiera minimizada.
 		if swapchain_tex != nil {
+
 			color_target := sdl.GPUColorTargetInfo {
 				texture     = swapchain_tex,
 				load_op     = .CLEAR,
-				clear_color = {0, 0.2, 0.5, 1},
+				clear_color = clear_color,
 				store_op    = .STORE,
 			}
 
@@ -456,6 +509,19 @@ main :: proc() {
 			)
 			sdl.DrawGPUIndexedPrimitives(render_pass, model.num_indices, 1, 0, 0, 0)
 			sdl.EndGPURenderPass(render_pass)
+
+			im_sdlgpu.PrepareDrawData(im_draw_data, cmd_buf)
+			im_color_target := sdl.GPUColorTargetInfo {
+				texture  = swapchain_tex,
+				load_op  = .LOAD,
+				store_op = .STORE,
+			}
+
+			im_render_pass := sdl.BeginGPURenderPass(cmd_buf, &im_color_target, 1, nil)
+			im_sdlgpu.RenderDrawData(im_draw_data, cmd_buf, im_render_pass)
+			sdl.EndGPURenderPass(im_render_pass)
+
+
 		} else {
 			log.debug("NOT RENDERING!")
 		}

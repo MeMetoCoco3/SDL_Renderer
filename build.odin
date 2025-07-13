@@ -52,7 +52,7 @@ run :: proc(cmd: []string) {
 	}
 
 	if code != 0 {
-		log.errorf("Process exited with non-zero code: {}\nCmd: {}", code, cmd)
+		log.errorf("Process exited with non-zero code: {}", code)
 		os.exit(1)
 	}
 

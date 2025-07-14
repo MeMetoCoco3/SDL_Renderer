@@ -99,6 +99,10 @@ init :: proc() {
 	// Asignamos una ventana al device.
 	ok = sdl.ClaimWindowForGPUDevice(gpu, window)
 
+	// Usamos esto para que la swapchain aplique  pow(color, 1/2.2) para conseguir colores lineales.
+	ok = sdl.SetGPUSwapchainParameters(gpu, window, .SDR_LINEAR, .VSYNC);assert(ok)
+
+
 	depth_texture = sdl.CreateGPUTexture(
 		gpu,
 		{
@@ -131,6 +135,10 @@ init_imgui :: proc() {
 	im_sdlgpu.Init(
 		&{Device = gpu, ColorTargetFormat = sdl.GetGPUSwapchainTextureFormat(gpu, window)},
 	)
+	style := im.GetStyle()
+	for &color in style.Colors {
+		color.rgb = linalg.pow(color.rgb, 2.2)
+	}
 }
 
 
@@ -214,12 +222,12 @@ load_model :: proc(texture_file, model_file: string) -> Model {
 	pixels_texture := sdl.CreateGPUTexture(
 		gpu,
 		{
-			format = .R8G8B8A8_UNORM,
-			usage = {.SAMPLER},
-			height = u32(img_size.y),
-			width = u32(img_size.x),
+			format               = .R8G8B8A8_UNORM_SRGB, // SRGB is used to convert values to a lineal colorspace. Is equal to pow(texel, 2.2)
+			usage                = {.SAMPLER},
+			height               = u32(img_size.y),
+			width                = u32(img_size.x),
 			layer_count_or_depth = 1,
-			num_levels = 1,
+			num_levels           = 1,
 		},
 	)
 
@@ -379,7 +387,7 @@ main :: proc() {
 	last_tick := sdl.GetTicks()
 
 	rotate := true
-	clear_color := sdl.FColor{0, 0.2, 0.5, 1}
+	clear_color := linalg.pow(sdl.FColor{0, 0.2, 0.5, 1}, 2.2)
 
 	main_loop: for {
 		free_all(context.temp_allocator)
@@ -390,7 +398,7 @@ main :: proc() {
 		delta_time := f32(current_tick - last_tick) / 1000
 		last_tick = current_tick
 
-		ui_input_mode := sdl.GetWindowRelativeMouseMode(window)
+		ui_input_mode := !sdl.GetWindowRelativeMouseMode(window)
 
 
 		event: sdl.Event
@@ -418,7 +426,7 @@ main :: proc() {
 			case .MOUSE_BUTTON_DOWN:
 				if event.button.button == 2 {
 					ui_input_mode = !ui_input_mode
-					_ = sdl.SetWindowRelativeMouseMode(window, ui_input_mode)
+					_ = sdl.SetWindowRelativeMouseMode(window, !ui_input_mode)
 				}
 			}
 
@@ -430,7 +438,7 @@ main :: proc() {
 
 		if im.Begin("Inspector") {
 			im.Checkbox("Rotate", &rotate)
-			im.ColorEdit3("Clear color", transmute(^[3]f32)&clear_color)
+			im.ColorEdit3("Clear color", transmute(^[3]f32)&clear_color, {.Float})
 		}
 
 		im.End()

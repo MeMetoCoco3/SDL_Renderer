@@ -35,6 +35,14 @@ Model :: struct {
 	texture:    ^sdl.GPUTexture,
 }
 
+Model_Id :: distinct int
+
+Entity :: struct {
+	model_id: Model_Id,
+	position: Vec3,
+	rotation: quaternion128,
+}
+
 
 init_game :: proc() {
 	g.clear_color = linalg.pow(sdl.FColor{0, 0.2, 0.5, 1}, 2.2)
@@ -42,7 +50,28 @@ init_game :: proc() {
 
 	copy_cmd_buffer := sdl.AcquireGPUCommandBuffer(g.gpu)
 	copy_pass := sdl.BeginGPUCopyPass(copy_cmd_buffer)
-	g.model = load_model(copy_pass, "colormap.png", "ship-pirate-large.obj")
+
+	colormap := load_texture_file(copy_pass, "colormap.png")
+
+
+	g.models = slice.clone(
+		[]Model {
+			{load_obj_file(copy_pass, "ship-small.obj"), colormap},
+			{load_obj_file(copy_pass, "ship-pirate-large.obj"), colormap},
+		},
+	)
+
+	g.entities = slice.clone(
+		[]Entity {
+			{model_id = 0, position = {-5, 0, 0}, rotation = 1}, // This rotation is equal to linalg.QUATERNIONF64_IDENTITY
+			{
+				model_id = 1,
+				position = {8, 0, 0},
+				rotation = linalg.quaternion_from_euler_angle_y_f32(15 * linalg.RAD_PER_DEG),
+			},
+		},
+	)
+
 
 	sdl.EndGPUCopyPass(copy_pass)
 	ok := sdl.SubmitGPUCommandBuffer(copy_cmd_buffer);sdl_assert(ok)
@@ -60,7 +89,11 @@ update_game :: proc(dt: f32) {
 
 	im.End()
 
-	if g.rotate do g.rotation += ROTATION_SPEED * dt
+	if g.rotate {
+		for &entity in g.entities {
+			entity.rotation *= linalg.quaternion_from_euler_angle_y_f32(ROTATION_SPEED * dt)
+		}
+	}
 	update_camera(dt)
 
 
@@ -75,11 +108,6 @@ render_game :: proc(cmd_buf: ^sdl.GPUCommandBuffer, swapchain_tex: ^sdl.GPUTextu
 	)
 
 	view_mat := linalg.matrix4_look_at_f32(g.camera.position, g.camera.target, {0, 1, 0})
-	model_mat :=
-		linalg.matrix4_translate_f32({0, 0, 0}) * linalg.matrix4_rotate_f32(g.rotation, {0, 1, 0})
-	ubo := UBO {
-		mvp = proj_mat * view_mat * model_mat,
-	}
 
 
 	color_target := sdl.GPUColorTargetInfo {
@@ -100,23 +128,35 @@ render_game :: proc(cmd_buf: ^sdl.GPUCommandBuffer, swapchain_tex: ^sdl.GPUTextu
 	// Empezamos el proceso de pasar datos a nuestra GPU, debemos bindearlo a la pipeline.
 	render_pass := sdl.BeginGPURenderPass(cmd_buf, &color_target, 1, &depth_target_info)
 
-	sdl.BindGPUGraphicsPipeline(render_pass, g.pipeline)
-	sdl.BindGPUVertexBuffers(
-		render_pass,
-		0,
-		&(sdl.GPUBufferBinding{buffer = g.model.vertex_buf}),
-		1,
-	)
-	sdl.BindGPUIndexBuffer(render_pass, {buffer = g.model.index_buf}, ._16BIT)
-	// Este 0 es el slot_index, hace referencia al binding = 0  en el vertex shader.
-	sdl.PushGPUVertexUniformData(cmd_buf, 0, &ubo, size_of(ubo))
-	sdl.BindGPUFragmentSamplers(
-		render_pass,
-		0,
-		&(sdl.GPUTextureSamplerBinding{texture = g.model.texture, sampler = g.sampler}),
-		1,
-	)
-	sdl.DrawGPUIndexedPrimitives(render_pass, g.model.num_indices, 1, 0, 0, 0)
+
+	for entity in g.entities {
+
+		model_mat := linalg.matrix4_from_trs_f32(entity.position, entity.rotation, {1, 1, 1})
+
+		ubo := UBO {
+			mvp = proj_mat * view_mat * model_mat,
+		}
+
+		model := g.models[entity.model_id]
+
+		sdl.BindGPUGraphicsPipeline(render_pass, g.pipeline)
+		sdl.BindGPUVertexBuffers(
+			render_pass,
+			0,
+			&(sdl.GPUBufferBinding{buffer = model.vertex_buf}),
+			1,
+		)
+		sdl.BindGPUIndexBuffer(render_pass, {buffer = model.index_buf}, ._16BIT)
+		// Este 0 es el slot_index, hace referencia al binding = 0  en el vertex shader.
+		sdl.PushGPUVertexUniformData(cmd_buf, 0, &ubo, size_of(ubo))
+		sdl.BindGPUFragmentSamplers(
+			render_pass,
+			0,
+			&(sdl.GPUTextureSamplerBinding{texture = model.texture, sampler = g.sampler}),
+			1,
+		)
+		sdl.DrawGPUIndexedPrimitives(render_pass, model.num_indices, 1, 0, 0, 0)
+	}
 	sdl.EndGPURenderPass(render_pass)
 
 

@@ -3,6 +3,13 @@ package main
 
 import sdl "vendor:sdl3"
 
+Vec3 :: [3]f32
+Vec2 :: [2]f32
+
+
+WHITE :: sdl.FColor{1, 1, 1, 1}
+ASSETS_PATH :: "assets"
+
 
 Global :: struct {
 	gpu:                      ^sdl.GPUDevice,
@@ -26,10 +33,8 @@ Global :: struct {
 	clear_color:              sdl.FColor,
 	rotate:                   bool,
 	rotation:                 f32,
-	model:                    Model,
+	models:                   []Model,
+	entities:                 []Entity,
 }
 
 g: Global
-
-WHITE :: sdl.FColor{1, 1, 1, 1}
-ASSETS_PATH :: "assets"

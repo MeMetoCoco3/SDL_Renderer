@@ -4,8 +4,6 @@ import os "core:os/os2"
 import "core:strconv"
 import "core:strings"
 
-Vec3 :: [3]f32
-Vec2 :: [2]f32
 
 Obj_Data :: struct {
 	positions: []Vec3,

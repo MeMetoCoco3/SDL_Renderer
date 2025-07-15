@@ -59,7 +59,9 @@ run :: proc(cmd: []string) {
 }
 
 exec :: proc(cmd: []string) -> (code: int, error: os.Error) {
-	process := os.process_start({command = cmd}) or_return
+	process := os.process_start(
+		{command = cmd, stdin = os.stdin, stdout = os.stdout, stderr = os.stderr},
+	) or_return
 	state := os.process_wait(process) or_return
 	os.process_close(process) or_return
 	return state.exit_code, nil

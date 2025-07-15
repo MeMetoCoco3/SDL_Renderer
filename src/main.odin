@@ -28,31 +28,27 @@ Model :: struct {
 	texture:     ^sdl.GPUTexture,
 }
 
-
-default_context: runtime.Context
-
-gpu: ^sdl.GPUDevice
-window: ^sdl.Window
-pipeline: ^sdl.GPUGraphicsPipeline
-depth_texture: ^sdl.GPUTexture
-window_size: [2]i32
-sampler: ^sdl.GPUSampler
-
-camera: struct {
-	position: Vec3,
-	target:   Vec3,
+Global :: struct {
+	gpu:                      ^sdl.GPUDevice,
+	window:                   ^sdl.Window,
+	pipeline:                 ^sdl.GPUGraphicsPipeline,
+	depth_texture:            ^sdl.GPUTexture,
+	depth_texture_format:     sdl.GPUTextureFormat,
+	swapchain_texture_format: sdl.GPUTextureFormat,
+	window_size:              [2]i32,
+	sampler:                  ^sdl.GPUSampler,
+	camera:                   struct {
+		position: Vec3,
+		target:   Vec3,
+	},
+	look:                     struct {
+		yaw:   f32,
+		pitch: f32,
+	},
+	key_down:                 #sparse[sdl.Scancode]bool,
+	mouse_move:               Vec2,
 }
 
-look: struct {
-	yaw:   f32,
-	pitch: f32,
-}
-
-key_down: #sparse[sdl.Scancode]bool
-mouse_move: Vec2
-
-// We need to define the buffer where we will measure our depth for depth buffer
-depth_texture_format := sdl.GPUTextureFormat.D16_UNORM
 WHITE :: sdl.FColor{1, 1, 1, 1}
 EYE_HEIGHT :: 1
 MOVE_SPEED :: 4
@@ -60,7 +56,12 @@ MOUSE_SENSITIVITY :: 0.5
 ASSETS_PATH :: "assets"
 
 
+g: Global
+
 init :: proc() {
+	@(static) sdl_log_context: runtime.Context
+	sdl_log_context = context
+	sdl_log_context.logger.options -= {.Short_File_Path, .Line, .Procedure}
 	sdl.SetLogPriorities(.VERBOSE)
 	sdl.SetLogOutputFunction(
 		proc "c" (
@@ -69,22 +70,35 @@ init :: proc() {
 			priority: sdl.LogPriority,
 			message: cstring,
 		) {
-			context = default_context
+			context = sdl_log_context
 			log.debugf("SDL {} [{}]: {}", category, priority, message)
 		},
 		nil,
 	)
 
 	// Iniciamos SDL con los sistemas que queremos.
-	ok := sdl.Init({.VIDEO});assert(ok)
+	ok := sdl.Init({.VIDEO});sdl_assert(ok)
 
 	// Iniciamos una ventana.
-	window = sdl.CreateWindow("Hello SDL", 1280, 780, {});assert(window != nil)
-	ok = sdl.GetWindowSize(window, &window_size.x, &window_size.y)
+	g.window = sdl.CreateWindow("Hello SDL", 1280, 780, {});sdl_assert(g.window != nil)
+	ok = sdl.GetWindowSize(g.window, &g.window_size.x, &g.window_size.y)
 
+	// Iniciamos un Device, y le pasamos el tipo de shaders que vamos a hacer.
+	// SPIRV es el tipo de shaders utilizado por vulkan.
+	g.gpu = sdl.CreateGPUDevice({.SPIRV, .DXIL, .MSL}, true, nil);sdl_assert(g.gpu != nil)
+
+	// Asignamos una ventana al device.
+	ok = sdl.ClaimWindowForGPUDevice(g.gpu, g.window)
+
+	// Usamos esto para que la swapchain aplique  pow(color, 1/2.2) para conseguir colores lineales.
+	ok = sdl.SetGPUSwapchainParameters(g.gpu, g.window, .SDR_LINEAR, .VSYNC);sdl_assert(ok)
+
+	g.swapchain_texture_format = sdl.GetGPUSwapchainTextureFormat(g.gpu, g.window)
+
+	g.depth_texture_format = .D16_UNORM
 	try_depth_format :: proc(format: sdl.GPUTextureFormat) {
-		if sdl.GPUTextureSupportsFormat(gpu, format, .D2, {.DEPTH_STENCIL_TARGET}) {
-			depth_texture_format = format
+		if sdl.GPUTextureSupportsFormat(g.gpu, format, .D2, {.DEPTH_STENCIL_TARGET}) {
+			g.depth_texture_format = format
 		}
 	}
 
@@ -92,36 +106,25 @@ init :: proc() {
 	try_depth_format(sdl.GPUTextureFormat.D24_UNORM)
 
 
-	// Iniciamos un Device, y le pasamos el tipo de shaders que vamos a hacer.
-	// SPIRV es el tipo de shaders utilizado por vulkan.
-	gpu = sdl.CreateGPUDevice({.SPIRV, .DXIL, .MSL}, true, nil);assert(gpu != nil)
-
-	// Asignamos una ventana al device.
-	ok = sdl.ClaimWindowForGPUDevice(gpu, window)
-
-	// Usamos esto para que la swapchain aplique  pow(color, 1/2.2) para conseguir colores lineales.
-	ok = sdl.SetGPUSwapchainParameters(gpu, window, .SDR_LINEAR, .VSYNC);assert(ok)
-
-
-	depth_texture = sdl.CreateGPUTexture(
-		gpu,
+	g.depth_texture = sdl.CreateGPUTexture(
+		g.gpu,
 		{
-			format = depth_texture_format,
+			format = g.depth_texture_format,
 			usage = {.DEPTH_STENCIL_TARGET},
-			width = u32(window_size.x),
-			height = u32(window_size.y),
+			width = u32(g.window_size.x),
+			height = u32(g.window_size.y),
 			layer_count_or_depth = 1,
 			num_levels = 1,
 		},
 	)
 
 
-	camera = {
+	g.camera = {
 		position = {0, EYE_HEIGHT, 10},
 		target   = {0, EYE_HEIGHT, 0},
 	}
 
-	ok = sdl.SetWindowRelativeMouseMode(window, true);assert(ok)
+	ok = sdl.SetWindowRelativeMouseMode(g.window, true);sdl_assert(ok)
 
 	init_imgui()
 
@@ -131,9 +134,9 @@ init :: proc() {
 init_imgui :: proc() {
 	im.CHECKVERSION()
 	im.CreateContext()
-	im_sdl.InitForSDLGPU(window)
+	im_sdl.InitForSDLGPU(g.window)
 	im_sdlgpu.Init(
-		&{Device = gpu, ColorTargetFormat = sdl.GetGPUSwapchainTextureFormat(gpu, window)},
+		&{Device = g.gpu, ColorTargetFormat = sdl.GetGPUSwapchainTextureFormat(g.gpu, g.window)},
 	)
 	style := im.GetStyle()
 	for &color in style.Colors {
@@ -144,8 +147,8 @@ init_imgui :: proc() {
 
 setup_pipeline :: proc() {
 	// Asignamos los shaders a la GPU.
-	vertex_shader := load_shader(gpu, "shader.vert")
-	fragment_shader := load_shader(gpu, "shader.frag")
+	vertex_shader := load_shader(g.gpu, "shader.vert")
+	fragment_shader := load_shader(g.gpu, "shader.frag")
 
 	// Describimos nuestros datos, en este caso decimos que vamos a pasar dos datos en esas localizaciones(las definimos en nuestros shaders), 
 	// tendran ese tamaño (3/4 floats), y tendran un offset de eso.
@@ -157,8 +160,8 @@ setup_pipeline :: proc() {
 
 
 	// Creamos un GPUGraphicsPipelineCreateInfo con los datos de nuestros shaders.
-	pipeline = sdl.CreateGPUGraphicsPipeline(
-		gpu,
+	g.pipeline = sdl.CreateGPUGraphicsPipeline(
+		g.gpu,
 		{
 			vertex_shader = vertex_shader,
 			fragment_shader = fragment_shader,
@@ -184,21 +187,19 @@ setup_pipeline :: proc() {
 			target_info = {
 				num_color_targets = 1,
 				color_target_descriptions = &(sdl.GPUColorTargetDescription {
-						format = sdl.GetGPUSwapchainTextureFormat(gpu, window),
+						format = sdl.GetGPUSwapchainTextureFormat(g.gpu, g.window),
 					}),
 				has_depth_stencil_target = true,
-				depth_stencil_format = depth_texture_format,
+				depth_stencil_format = g.depth_texture_format,
 			},
 		},
 	)
-
-	log.debug(sdl.GetError())
-	assert(pipeline != nil)
+	sdl_assert(g.pipeline != nil)
 	// Una vez hayamos hecho el binding con la pipeline, podemos liberarlos.
-	sdl.ReleaseGPUShader(gpu, vertex_shader)
-	sdl.ReleaseGPUShader(gpu, fragment_shader)
+	sdl.ReleaseGPUShader(g.gpu, vertex_shader)
+	sdl.ReleaseGPUShader(g.gpu, fragment_shader)
 
-	sampler = sdl.CreateGPUSampler(gpu, {})
+	g.sampler = sdl.CreateGPUSampler(g.gpu, {})
 }
 
 
@@ -220,7 +221,7 @@ load_model :: proc(texture_file, model_file: string) -> Model {
 
 	// Create texture on the gpu
 	pixels_texture := sdl.CreateGPUTexture(
-		gpu,
+		g.gpu,
 		{
 			format               = .R8G8B8A8_UNORM_SRGB, // SRGB is used to convert values to a lineal colorspace. Is equal to pow(texel, 2.2)
 			usage                = {.SAMPLER},
@@ -257,37 +258,40 @@ load_model :: proc(texture_file, model_file: string) -> Model {
 	indices_byte_size := len(indices) * size_of(indices[0])
 
 	// Creamos un buffer para los datos.
-	vertex_buffer := sdl.CreateGPUBuffer(gpu, {usage = {.VERTEX}, size = u32(vertices_byte_size)})
-	index_buffer := sdl.CreateGPUBuffer(gpu, {usage = {.INDEX}, size = u32(indices_byte_size)})
+	vertex_buffer := sdl.CreateGPUBuffer(
+		g.gpu,
+		{usage = {.VERTEX}, size = u32(vertices_byte_size)},
+	)
+	index_buffer := sdl.CreateGPUBuffer(g.gpu, {usage = {.INDEX}, size = u32(indices_byte_size)})
 
 	// Creamos un transfer_buffer, es un buffer especial desde el que podemos copiar datos al GPU buffer.
 	transfer_buffer := sdl.CreateGPUTransferBuffer(
-		gpu,
+		g.gpu,
 		{usage = .UPLOAD, size = u32(vertices_byte_size + indices_byte_size)},
 	)
 
 	// Pedimos la memoria a la que vamos a pasar nuestros datos, y la pasamos, tras esto podemos llamar a Unmap
-	transfer_memory := transmute([^]byte)sdl.MapGPUTransferBuffer(gpu, transfer_buffer, false)
+	transfer_memory := transmute([^]byte)sdl.MapGPUTransferBuffer(g.gpu, transfer_buffer, false)
 	mem.copy(transfer_memory, raw_data(vertices), vertices_byte_size)
 	mem.copy(transfer_memory[vertices_byte_size:], raw_data(indices), indices_byte_size)
-	sdl.UnmapGPUTransferBuffer(gpu, transfer_buffer)
+	sdl.UnmapGPUTransferBuffer(g.gpu, transfer_buffer)
 
 	delete(indices)
 	delete(vertices)
 
 	tex_transfer_buffer := sdl.CreateGPUTransferBuffer(
-		gpu,
+		g.gpu,
 		{usage = .UPLOAD, size = u32(pixelx_byte_size)},
 	)
 
-	tex_transfer_memory := sdl.MapGPUTransferBuffer(gpu, tex_transfer_buffer, false)
+	tex_transfer_memory := sdl.MapGPUTransferBuffer(g.gpu, tex_transfer_buffer, false)
 	mem.copy(tex_transfer_memory, pixels, int(pixelx_byte_size))
-	sdl.UnmapGPUTransferBuffer(gpu, tex_transfer_buffer)
+	sdl.UnmapGPUTransferBuffer(g.gpu, tex_transfer_buffer)
 
 
 	// Para enviar ordenes necesitamos un command buffer, la orden es enviar la memoria de transfer buffer al buffer de la GPU, 
 	// para ello necesitamos un copy_pass
-	copy_cmd_buffer := sdl.AcquireGPUCommandBuffer(gpu)
+	copy_cmd_buffer := sdl.AcquireGPUCommandBuffer(g.gpu)
 	copy_pass := sdl.BeginGPUCopyPass(copy_cmd_buffer)
 	sdl.UploadToGPUBuffer(
 		copy_pass,
@@ -311,11 +315,11 @@ load_model :: proc(texture_file, model_file: string) -> Model {
 
 	sdl.EndGPUCopyPass(copy_pass)
 
-	ok := sdl.SubmitGPUCommandBuffer(copy_cmd_buffer);assert(ok)
+	ok := sdl.SubmitGPUCommandBuffer(copy_cmd_buffer);sdl_assert(ok)
 
 	// Ya hemos terminado con el transfer_buffer, asi que lo liberamos.
-	sdl.ReleaseGPUTransferBuffer(gpu, transfer_buffer)
-	sdl.ReleaseGPUTransferBuffer(gpu, tex_transfer_buffer)
+	sdl.ReleaseGPUTransferBuffer(g.gpu, transfer_buffer)
+	sdl.ReleaseGPUTransferBuffer(g.gpu, tex_transfer_buffer)
 
 	return {
 		vertex_buf = vertex_buffer,
@@ -327,18 +331,18 @@ load_model :: proc(texture_file, model_file: string) -> Model {
 
 update_camera :: proc(dt: f32) {
 	move_input: Vec2
-	if key_down[.W] do move_input.y = 1
-	if key_down[.S] do move_input.y = -1
-	if key_down[.D] do move_input.x = 1
-	if key_down[.A] do move_input.x = -1
+	if g.key_down[.W] do move_input.y = 1
+	if g.key_down[.S] do move_input.y = -1
+	if g.key_down[.D] do move_input.x = 1
+	if g.key_down[.A] do move_input.x = -1
 
-	look_input := mouse_move * MOUSE_SENSITIVITY
-	look.yaw = math.wrap(look.yaw + look_input.x, 360)
-	look.pitch = math.clamp(look.pitch + look_input.y, -89, 89)
+	look_input := g.mouse_move * MOUSE_SENSITIVITY
+	g.look.yaw = math.wrap(g.look.yaw + look_input.x, 360)
+	g.look.pitch = math.clamp(g.look.pitch + look_input.y, -89, 89)
 
 	look_mat := linalg.matrix3_from_yaw_pitch_roll_f32(
-		linalg.to_radians(look.yaw),
-		linalg.to_radians(look.pitch),
+		linalg.to_radians(g.look.yaw),
+		linalg.to_radians(g.look.pitch),
 		0,
 	)
 
@@ -349,8 +353,8 @@ update_camera :: proc(dt: f32) {
 
 	motion := linalg.normalize0(move_dir) * MOVE_SPEED * dt
 
-	camera.position += motion
-	camera.target = camera.position + forward
+	g.camera.position += motion
+	g.camera.target = g.camera.position + forward
 
 }
 
@@ -358,20 +362,19 @@ main :: proc() {
 
 	// Creamos un custom logger para imprimir mensajes desde SDL
 	context.logger = log.create_console_logger()
-	default_context = context
 
 	init()
 	setup_pipeline()
 	model := load_model("colormap.png", "ship-pirate-large.obj")
 
 	// Create a sampler for shader
-	sampler := sdl.CreateGPUSampler(gpu, {})
+	sampler := sdl.CreateGPUSampler(g.gpu, {})
 
 
 	// Creamos una matriz de projeccion.
 	proj_mat := linalg.matrix4_perspective_f32(
 		70,
-		f32(window_size.x) / f32(window_size.y),
+		f32(g.window_size.x) / f32(g.window_size.y),
 		0.1,
 		1000,
 	)
@@ -392,13 +395,13 @@ main :: proc() {
 	main_loop: for {
 		free_all(context.temp_allocator)
 
-		mouse_move = {0, 0}
+		g.mouse_move = {0, 0}
 
 		current_tick := sdl.GetTicks()
 		delta_time := f32(current_tick - last_tick) / 1000
 		last_tick = current_tick
 
-		ui_input_mode := !sdl.GetWindowRelativeMouseMode(window)
+		ui_input_mode := !sdl.GetWindowRelativeMouseMode(g.window)
 
 
 		event: sdl.Event
@@ -411,22 +414,22 @@ main :: proc() {
 			case .KEY_DOWN:
 				if !ui_input_mode {
 					if event.key.scancode == .ESCAPE || event.key.scancode == .Q do break main_loop
-					key_down[event.key.scancode] = true
+					g.key_down[event.key.scancode] = true
 				}
 			case .KEY_UP:
 				if !ui_input_mode {
-					key_down[event.key.scancode] = false
+					g.key_down[event.key.scancode] = false
 				}
 
 			case .MOUSE_MOTION:
 				if !ui_input_mode {
-					mouse_move += {event.motion.xrel, event.motion.yrel}
+					g.mouse_move += {event.motion.xrel, event.motion.yrel}
 				}
 
 			case .MOUSE_BUTTON_DOWN:
 				if event.button.button == 2 {
 					ui_input_mode = !ui_input_mode
-					_ = sdl.SetWindowRelativeMouseMode(window, !ui_input_mode)
+					_ = sdl.SetWindowRelativeMouseMode(g.window, !ui_input_mode)
 				}
 			}
 
@@ -448,22 +451,22 @@ main :: proc() {
 
 
 		// Creamos un buffer de comandos, encargado de enviar ordenes a la GPU.
-		cmd_buf := sdl.AcquireGPUCommandBuffer(gpu)
+		cmd_buf := sdl.AcquireGPUCommandBuffer(g.gpu)
 
 		// WARN: Chekear esta swapchain texture definicion
 		// Swapchain texture es una textura que con el contenido de una ventana..
 		swapchain_tex: ^sdl.GPUTexture
 		ok := sdl.WaitAndAcquireGPUSwapchainTexture(
 			cmd_buf,
-			window,
+			g.window,
 			&swapchain_tex,
 			nil,
 			nil,
-		);assert(ok)
+		);sdl_assert(ok)
 
 
 		up_vector: Vec3 = {0, 1, 0}
-		view_mat := linalg.matrix4_look_at_f32(camera.position, camera.target, up_vector)
+		view_mat := linalg.matrix4_look_at_f32(g.camera.position, g.camera.target, up_vector)
 		model_mat :=
 			linalg.matrix4_translate_f32({0, 0, 0}) *
 			linalg.matrix4_rotate_f32(rotation, up_vector)
@@ -490,7 +493,7 @@ main :: proc() {
 
 
 			depth_target_info := sdl.GPUDepthStencilTargetInfo {
-				texture     = depth_texture,
+				texture     = g.depth_texture,
 				load_op     = .CLEAR,
 				clear_depth = 1,
 				store_op    = .DONT_CARE,
@@ -499,7 +502,7 @@ main :: proc() {
 			// Empezamos el proceso de pasar datos a nuestra GPU, debemos bindearlo a la pipeline.
 			render_pass := sdl.BeginGPURenderPass(cmd_buf, &color_target, 1, &depth_target_info)
 
-			sdl.BindGPUGraphicsPipeline(render_pass, pipeline)
+			sdl.BindGPUGraphicsPipeline(render_pass, g.pipeline)
 			sdl.BindGPUVertexBuffers(
 				render_pass,
 				0,
@@ -534,7 +537,7 @@ main :: proc() {
 			log.debug("NOT RENDERING!")
 		}
 
-		ok = sdl.SubmitGPUCommandBuffer(cmd_buf);assert(ok)
+		ok = sdl.SubmitGPUCommandBuffer(cmd_buf);sdl_assert(ok)
 	}
 }
 

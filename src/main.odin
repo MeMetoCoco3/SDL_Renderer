@@ -97,7 +97,6 @@ main :: proc() {
 	init_imgui()
 
 	init_game()
-	setup_pipeline()
 
 	last_tick := sdl.GetTicks()
 

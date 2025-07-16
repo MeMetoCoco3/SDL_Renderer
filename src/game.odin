@@ -1,5 +1,6 @@
 package main
 
+import "core:log"
 import "core:math"
 import "core:math/linalg"
 import "core:mem"
@@ -16,13 +17,23 @@ MOVE_SPEED :: 4
 MOUSE_SENSITIVITY :: 0.5
 
 UBO :: struct {
-	mvp: matrix[4, 4]f32,
+	m:  matrix[4, 4]f32,
+	vp: matrix[4, 4]f32,
 }
 
+UBO_Frag_Global :: struct #packed {
+	light_position:  Vec3,
+	_:               f32,
+	light_color:     Vec3,
+	light_intensity: f32,
+}
+
+
 Vertex_Data :: struct {
-	pos:   Vec3,
-	color: sdl.FColor,
-	uv:    Vec2,
+	pos:    Vec3,
+	color:  sdl.FColor,
+	uv:     Vec2,
+	normal: Vec3,
 }
 
 Mesh :: struct {
@@ -45,7 +56,11 @@ Entity :: struct {
 
 
 init_game :: proc() {
-	g.clear_color = linalg.pow(sdl.FColor{0, 0.2, 0.5, 1}, 2.2)
+
+	log.debug("size of UBO_FRAG_GLOBAL: ", size_of(UBO_Frag_Global))
+	log.debug("offset of light_position: ", offset_of(UBO_Frag_Global, light_position))
+	log.debug("offset of light_color: ", offset_of(UBO_Frag_Global, light_color))
+	log.debug("offset of light_intensity ", offset_of(UBO_Frag_Global, light_intensity))
 	setup_pipeline()
 
 	copy_cmd_buffer := sdl.AcquireGPUCommandBuffer(g.gpu)
@@ -77,14 +92,24 @@ init_game :: proc() {
 	ok := sdl.SubmitGPUCommandBuffer(copy_cmd_buffer);sdl_assert(ok)
 
 
+	g.clear_color = 0
 	g.rotation = f32(0)
 	g.rotate = true
+
+	g.light_color = {0, 3, 0}
+	g.light_position = {0, -4, 0}
+	g.light_intensity = 5
 }
 
 update_game :: proc(dt: f32) {
 	if im.Begin("Inspector") {
 		im.Checkbox("Rotate", &g.rotate)
 		im.ColorEdit3("Clear color", transmute(^[3]f32)&g.clear_color, {.Float})
+
+		im.SeparatorText("Light")
+		im.DragFloat3("Position", &g.light_position, 0.1, -10, 10)
+		im.DragFloat("Intensity", &g.light_intensity, 0.1, 0, 1000)
+		im.ColorEdit3("Color", &g.light_color, {.Float})
 	}
 
 	im.End()
@@ -100,6 +125,15 @@ update_game :: proc(dt: f32) {
 }
 
 render_game :: proc(cmd_buf: ^sdl.GPUCommandBuffer, swapchain_tex: ^sdl.GPUTexture) {
+	ubo_frag_global := UBO_Frag_Global {
+		light_position  = g.light_position,
+		light_color     = g.light_color,
+		light_intensity = g.light_intensity,
+	}
+
+	sdl.PushGPUFragmentUniformData(cmd_buf, 0, &ubo_frag_global, size_of(ubo_frag_global))
+
+
 	proj_mat := linalg.matrix4_perspective_f32(
 		70,
 		f32(g.window_size.x) / f32(g.window_size.y),
@@ -134,7 +168,8 @@ render_game :: proc(cmd_buf: ^sdl.GPUCommandBuffer, swapchain_tex: ^sdl.GPUTextu
 		model_mat := linalg.matrix4_from_trs_f32(entity.position, entity.rotation, {1, 1, 1})
 
 		ubo := UBO {
-			mvp = proj_mat * view_mat * model_mat,
+			m  = model_mat,
+			vp = proj_mat * view_mat,
 		}
 
 		model := g.models[entity.model_id]
@@ -174,6 +209,7 @@ setup_pipeline :: proc() {
 		{location = 0, format = .FLOAT3, offset = u32(offset_of(Vertex_Data, pos))},
 		{location = 1, format = .FLOAT4, offset = u32(offset_of(Vertex_Data, color))},
 		{location = 2, format = .FLOAT2, offset = u32(offset_of(Vertex_Data, uv))},
+		{location = 3, format = .FLOAT3, offset = u32(offset_of(Vertex_Data, normal))},
 	}
 
 

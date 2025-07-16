@@ -35,6 +35,9 @@ Global :: struct {
 	rotation:                 f32,
 	models:                   []Model,
 	entities:                 []Entity,
+	light_position:           Vec3,
+	light_color:              Vec3,
+	light_intensity:          f32,
 }
 
 g: Global

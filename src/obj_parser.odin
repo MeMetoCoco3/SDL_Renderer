@@ -8,12 +8,14 @@ import "core:strings"
 Obj_Data :: struct {
 	positions: []Vec3,
 	uvs:       []Vec2,
+	normals:   []Vec3,
 	faces:     []Obj_FaceIndex,
 }
 
 Obj_FaceIndex :: struct {
-	pos: uint,
-	uv:  uint,
+	pos:    uint,
+	uv:     uint,
+	normal: uint,
 }
 
 
@@ -30,6 +32,7 @@ obj_load :: proc(filename: string, alloc := context.allocator) -> Obj_Data {
 
 	positions := make([dynamic]Vec3, alloc)
 	uvs := make([dynamic]Vec2, alloc)
+	normals := make([dynamic]Vec3, alloc)
 	faces := make([dynamic]Obj_FaceIndex, alloc)
 
 	for line in strings.split_lines_iterator(&input_string) {
@@ -39,12 +42,15 @@ obj_load :: proc(filename: string, alloc := context.allocator) -> Obj_Data {
 		case 'v':
 			switch line[1] {
 			case ' ':
-				position := parse_position(line[2:])
+				position := parse_vec3(line[2:])
 				// fmt.println(position)
 				append(&positions, position)
 			case 't':
 				uv := parse_uv(line[3:])
 				append(&uvs, uv)
+			case 'n':
+				normal := parse_vec3(line[3:])
+				append(&normals, normal)
 			}
 		case 'f':
 			indices := parse_faces(line[2:])
@@ -52,7 +58,7 @@ obj_load :: proc(filename: string, alloc := context.allocator) -> Obj_Data {
 		}
 	}
 
-	return Obj_Data{positions = positions[:], uvs = uvs[:], faces = faces[:]}
+	return Obj_Data{positions = positions[:], uvs = uvs[:], normals = normals[:], faces = faces[:]}
 }
 
 extract_separated :: proc(s: ^string, sep: byte) -> string {
@@ -72,7 +78,7 @@ parse_uint :: proc(s: string) -> uint {
 	assert(ok)
 	return res
 }
-parse_position :: proc(s: string) -> Vec3 {
+parse_vec3 :: proc(s: string) -> Vec3 {
 	s := s
 	x := parse_f32(extract_separated(&s, ' '))
 	y := parse_f32(extract_separated(&s, ' '))
@@ -101,6 +107,7 @@ parse_face_index :: proc(s: string) -> Obj_FaceIndex {
 	return {
 		pos = parse_uint(extract_separated(&s, '/')) - 1,
 		uv = parse_uint(extract_separated(&s, '/')) - 1,
+		normal = parse_uint(extract_separated(&s, '/')) - 1,
 	}
 }
 
@@ -108,5 +115,6 @@ parse_face_index :: proc(s: string) -> Obj_FaceIndex {
 obj_destroy :: proc(obj: Obj_Data) {
 	delete(obj.positions)
 	delete(obj.uvs)
+	delete(obj.normals)
 	delete(obj.faces)
 }

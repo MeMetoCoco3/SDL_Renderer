@@ -62,6 +62,6 @@ load_obj_file :: proc(copy_pass: ^sdl.GPUCopyPass, obj_file: string) -> Mesh {
 load_model :: proc(copy_pass: ^sdl.GPUCopyPass, texture_file, model_file: string) -> Model {
 	return {
 		mesh = load_obj_file(copy_pass, model_file),
-		texture = load_texture_file(copy_pass, texture_file),
+		material = {diffuse_texture = load_texture_file(copy_pass, texture_file)},
 	}
 }

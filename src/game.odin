@@ -73,40 +73,42 @@ Entity :: struct {
 }
 
 Game_State :: struct {
-	pipeline:            ^sdl.GPUGraphicsPipeline,
-	sampler:             ^sdl.GPUSampler,
-	camera:              struct {
+	object_pipeline:      ^sdl.GPUGraphicsPipeline,
+	light_shape_pipeline: ^sdl.GPUGraphicsPipeline,
+	light_shape_mesh:     Mesh,
+	default_sampler:      ^sdl.GPUSampler,
+	camera:               struct {
 		position: Vec3,
 		target:   Vec3,
 	},
-	look:                struct {
+	look:                 struct {
 		yaw:   f32,
 		pitch: f32,
 	},
-	clear_color:         sdl.FColor,
-	rotate:              bool,
-	models:              []Model,
-	entities:            []Entity,
-	light_position:      Vec3,
-	light_color:         Vec3,
-	light_intensity:     f32,
-	ambient_light_color: Vec3,
+	rotate:               bool,
+	models:               []Model,
+	entities:             []Entity,
+	light_position:       Vec3,
+	light_color:          Vec3,
+	light_intensity:      f32,
+	ambient_light_color:  Vec3,
 }
 
 
 init_game :: proc() {
-
-	log.debug("size of UBO_FRAG_GLOBAL: ", size_of(UBO_Frag_Global))
-	log.debug("offset of light_position: ", offset_of(UBO_Frag_Global, light_position))
-	log.debug("offset of light_color: ", offset_of(UBO_Frag_Global, light_color))
-	log.debug("offset of light_intensity ", offset_of(UBO_Frag_Global, light_intensity))
-	log.debug("offset of viewPosition ", offset_of(UBO_Frag_Global, view_position))
 	setup_pipeline()
+	setup_light_shape_pipeline()
+
+	g.default_sampler = sdl.CreateGPUSampler(g.gpu, {min_filter = .LINEAR, mag_filter = .LINEAR})
 
 	copy_cmd_buffer := sdl.AcquireGPUCommandBuffer(g.gpu)
 	copy_pass := sdl.BeginGPUCopyPass(copy_cmd_buffer)
 
+	g.light_shape_mesh = generate_box_mesh(copy_pass, 0.2, 0.2, 0.2)
+
 	colormap := load_texture_file(copy_pass, "colormap.png")
+	odd_floor := load_texture_file(copy_pass, "odd_floor.png")
+	prototype_texture := load_texture_file(copy_pass, "texture_01.png")
 
 
 	g.models = slice.clone(
@@ -123,6 +125,18 @@ init_game :: proc() {
 					specular_shininess = 1000,
 				},
 			},
+			{
+				generate_plane_mesh(copy_pass, 10, 10),
+				{diffuse_texture = odd_floor, specular_color = 0, specular_shininess = 1},
+			},
+			{
+				generate_box_mesh(copy_pass, 1, 1, 1),
+				{
+					diffuse_texture = prototype_texture,
+					specular_color = 1,
+					specular_shininess = 100,
+				},
+			},
 		},
 	)
 
@@ -134,6 +148,8 @@ init_game :: proc() {
 				position = {8, 0, 0},
 				rotation = linalg.quaternion_from_euler_angle_y_f32(15 * linalg.RAD_PER_DEG),
 			},
+			{model_id = 2, position = {0, -1, 0}, rotation = 0},
+			{model_id = 3, position = {0, 0.5, 4}, rotation = 0},
 		},
 	)
 
@@ -142,19 +158,17 @@ init_game :: proc() {
 	ok := sdl.SubmitGPUCommandBuffer(copy_cmd_buffer);sdl_assert(ok)
 
 
-	g.clear_color = 0
 	g.rotate = true
 
 	g.light_color = {1, 1, 1}
-	g.light_position = {0, -4, 0}
-	g.light_intensity = 5
-	g.ambient_light_color = {1, 1, 1}
+	g.light_position = {0, 4, 0}
+	g.light_intensity = 1
+	g.ambient_light_color = 0.1
 }
 
 update_game :: proc(dt: f32) {
 	if im.Begin("Inspector") {
 		im.Checkbox("Rotate", &g.rotate)
-		im.ColorEdit3("Clear color", transmute(^[3]f32)&g.clear_color, {.Float})
 		im.ColorEdit3("Ambient color", &g.ambient_light_color, {.Float})
 
 		im.SeparatorText("Light")
@@ -214,10 +228,12 @@ render_game :: proc(cmd_buf: ^sdl.GPUCommandBuffer, swapchain_tex: ^sdl.GPUTextu
 	sdl.PushGPUFragmentUniformData(cmd_buf, 0, &ubo_frag_global, size_of(ubo_frag_global))
 
 
+	clear_color: sdl.FColor = 1
+	clear_color.rgb = g.ambient_light_color
 	color_target := sdl.GPUColorTargetInfo {
 		texture     = swapchain_tex,
 		load_op     = .CLEAR,
-		clear_color = g.clear_color,
+		clear_color = clear_color,
 		store_op    = .STORE,
 	}
 
@@ -232,7 +248,26 @@ render_game :: proc(cmd_buf: ^sdl.GPUCommandBuffer, swapchain_tex: ^sdl.GPUTextu
 	// Empezamos el proceso de pasar datos a nuestra GPU, debemos bindearlo a la pipeline.
 	render_pass := sdl.BeginGPURenderPass(cmd_buf, &color_target, 1, &depth_target_info)
 
-	sdl.BindGPUGraphicsPipeline(render_pass, g.pipeline)
+	// Push light visualization
+	{
+		sdl.BindGPUGraphicsPipeline(render_pass, g.light_shape_pipeline)
+
+		model_mat := linalg.matrix4_translate_f32(g.light_position)
+		sdl.PushGPUVertexUniformData(cmd_buf, 1, &model_mat, size_of(model_mat))
+
+		sdl.BindGPUVertexBuffers(
+			render_pass,
+			0,
+			&(sdl.GPUBufferBinding{buffer = g.light_shape_mesh.vertex_buf}),
+			1,
+		)
+
+		sdl.BindGPUIndexBuffer(render_pass, {buffer = g.light_shape_mesh.index_buf}, ._16BIT)
+		sdl.DrawGPUIndexedPrimitives(render_pass, g.light_shape_mesh.num_indices, 1, 0, 0, 0)
+	}
+
+
+	sdl.BindGPUGraphicsPipeline(render_pass, g.object_pipeline)
 
 	for entity in g.entities {
 
@@ -272,7 +307,7 @@ render_game :: proc(cmd_buf: ^sdl.GPUCommandBuffer, swapchain_tex: ^sdl.GPUTextu
 			0,
 			&(sdl.GPUTextureSamplerBinding {
 					texture = model.material.diffuse_texture,
-					sampler = g.sampler,
+					sampler = g.default_sampler,
 				}),
 			1,
 		)
@@ -283,24 +318,20 @@ render_game :: proc(cmd_buf: ^sdl.GPUCommandBuffer, swapchain_tex: ^sdl.GPUTextu
 
 }
 
-
-setup_pipeline :: proc() {
+setup_light_shape_pipeline :: proc() {
 	// Asignamos los shaders a la GPU.
-	vertex_shader := load_shader(g.gpu, "shader.vert")
-	fragment_shader := load_shader(g.gpu, "shader.frag")
+	vertex_shader := load_shader(g.gpu, "lightshape.vert")
+	fragment_shader := load_shader(g.gpu, "lightshape.frag")
 
 	// Describimos nuestros datos, en este caso decimos que vamos a pasar dos datos en esas localizaciones(las definimos en nuestros shaders), 
 	// tendran ese tamaño (3/4 floats), y tendran un offset de eso.
 	vertex_attributes := []sdl.GPUVertexAttribute {
 		{location = 0, format = .FLOAT3, offset = u32(offset_of(Vertex_Data, pos))},
-		{location = 1, format = .FLOAT4, offset = u32(offset_of(Vertex_Data, color))},
-		{location = 2, format = .FLOAT2, offset = u32(offset_of(Vertex_Data, uv))},
-		{location = 3, format = .FLOAT3, offset = u32(offset_of(Vertex_Data, normal))},
 	}
 
 
 	// Creamos un GPUGraphicsPipelineCreateInfo con los datos de nuestros shaders.
-	g.pipeline = sdl.CreateGPUGraphicsPipeline(
+	g.light_shape_pipeline = sdl.CreateGPUGraphicsPipeline(
 	g.gpu,
 	{
 		vertex_shader = vertex_shader,
@@ -334,12 +365,68 @@ setup_pipeline :: proc() {
 		},
 	},
 	)
-	sdl_assert(g.pipeline != nil)
+	sdl_assert(g.object_pipeline != nil)
 	// Una vez hayamos hecho el binding con la pipeline, podemos liberarlos.
 	sdl.ReleaseGPUShader(g.gpu, vertex_shader)
 	sdl.ReleaseGPUShader(g.gpu, fragment_shader)
 
-	g.sampler = sdl.CreateGPUSampler(g.gpu, {})
+}
+
+
+setup_pipeline :: proc() {
+	// Asignamos los shaders a la GPU.
+	vertex_shader := load_shader(g.gpu, "shader.vert")
+	fragment_shader := load_shader(g.gpu, "shader.frag")
+
+	// Describimos nuestros datos, en este caso decimos que vamos a pasar dos datos en esas localizaciones(las definimos en nuestros shaders), 
+	// tendran ese tamaño (3/4 floats), y tendran un offset de eso.
+	vertex_attributes := []sdl.GPUVertexAttribute {
+		{location = 0, format = .FLOAT3, offset = u32(offset_of(Vertex_Data, pos))},
+		{location = 1, format = .FLOAT4, offset = u32(offset_of(Vertex_Data, color))},
+		{location = 2, format = .FLOAT2, offset = u32(offset_of(Vertex_Data, uv))},
+		{location = 3, format = .FLOAT3, offset = u32(offset_of(Vertex_Data, normal))},
+	}
+
+
+	// Creamos un GPUGraphicsPipelineCreateInfo con los datos de nuestros shaders.
+	g.object_pipeline = sdl.CreateGPUGraphicsPipeline(
+	g.gpu,
+	{
+		vertex_shader = vertex_shader,
+		fragment_shader = fragment_shader,
+		primitive_type = .TRIANGLELIST,
+		// Creamos GPUVertexInputState que da informacion de nuestro vertex buffer.
+		vertex_input_state = {
+			num_vertex_buffers = 1,
+			vertex_buffer_descriptions = &(sdl.GPUVertexBufferDescription {
+					slot = 0,
+					pitch = size_of(Vertex_Data),
+				}),
+			num_vertex_attributes = u32(len(vertex_attributes)),
+			vertex_attributes = raw_data(vertex_attributes),
+		},
+		depth_stencil_state = {
+			enable_depth_test = true,
+			enable_depth_write = true,
+			compare_op = .LESS,
+		},
+		// rasterizer_state = {cull_mode = .BACK, fill_mode = .LINE},
+		rasterizer_state = {cull_mode = .BACK},
+		// Creamos GPUGraphicsPipelineTargetInfo que define el color de nuestros pixeles.
+		target_info = {
+			num_color_targets = 1,
+			color_target_descriptions = &(sdl.GPUColorTargetDescription {
+					format = sdl.GetGPUSwapchainTextureFormat(g.gpu, g.window),
+				}),
+			has_depth_stencil_target = true,
+			depth_stencil_format = g.depth_texture_format,
+		},
+	},
+	)
+	sdl_assert(g.object_pipeline != nil)
+	// Una vez hayamos hecho el binding con la pipeline, podemos liberarlos.
+	sdl.ReleaseGPUShader(g.gpu, vertex_shader)
+	sdl.ReleaseGPUShader(g.gpu, fragment_shader)
 }
 
 update_camera :: proc(dt: f32) {
@@ -362,7 +449,7 @@ update_camera :: proc(dt: f32) {
 	forward := Vec3{0, 0, -1} * look_mat
 	right := Vec3{1, 0, 0} * look_mat
 	move_dir := forward * move_input.y + right * move_input.x
-	move_dir.y = 0
+	// move_dir.y = 0
 
 	motion := linalg.normalize0(move_dir) * MOVE_SPEED * dt
 

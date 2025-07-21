@@ -40,16 +40,14 @@ init_sdl :: proc() {
 	g.swapchain_texture_format = sdl.GetGPUSwapchainTextureFormat(g.gpu, g.window)
 
 	g.depth_texture_format = .D16_UNORM
-
-
 	try_depth_format :: proc(format: sdl.GPUTextureFormat) {
 		if sdl.GPUTextureSupportsFormat(g.gpu, format, .D2, {.DEPTH_STENCIL_TARGET}) {
 			g.depth_texture_format = format
 		}
 	}
 
-	try_depth_format(sdl.GPUTextureFormat.D32_FLOAT)
-	try_depth_format(sdl.GPUTextureFormat.D24_UNORM)
+	try_depth_format(.D32_FLOAT)
+	try_depth_format(.D24_UNORM)
 
 
 	g.depth_texture = sdl.CreateGPUTexture(
@@ -65,12 +63,10 @@ init_sdl :: proc() {
 	)
 
 
-	g.camera = {
-		position = {0, EYE_HEIGHT, 10},
-		target   = {0, EYE_HEIGHT, 0},
-	}
+	g.ui_input_mode = false
 
-	ok = sdl.SetWindowRelativeMouseMode(g.window, true);sdl_assert(ok)
+
+	_ = sdl.SetWindowRelativeMouseMode(g.window, true);sdl_assert(ok)
 
 }
 
@@ -86,7 +82,12 @@ init_imgui :: proc() {
 		color.rgb = linalg.pow(color.rgb, 2.2)
 	}
 }
-
+set_ui_input_mode :: proc(new_mode: bool) {
+	if new_mode != g.ui_input_mode {
+		g.ui_input_mode = new_mode
+		_ = sdl.SetWindowRelativeMouseMode(g.window, !g.ui_input_mode)
+	}
+}
 
 main :: proc() {
 
@@ -99,45 +100,51 @@ main :: proc() {
 	init_game()
 
 	last_tick := sdl.GetTicks()
+	im_io := im.GetIO()
+
 
 	main_loop: for {
 		free_all(context.temp_allocator)
 
-		g.mouse_move = {0, 0}
+		g.mouse_move = {}
 
 		current_tick := sdl.GetTicks()
 		delta_time := f32(current_tick - last_tick) / 1000
 		last_tick = current_tick
 
-		ui_input_mode := !sdl.GetWindowRelativeMouseMode(g.window)
+		g.ui_input_mode = !sdl.GetWindowRelativeMouseMode(g.window)
 
 
 		event: sdl.Event
 		for sdl.PollEvent(&event) {
-			if ui_input_mode do im_sdl.ProcessEvent(&event)
+			if g.ui_input_mode do im_sdl.ProcessEvent(&event)
 
 			#partial switch event.type {
 			case .QUIT:
 				break main_loop
 			case .KEY_DOWN:
-				if !ui_input_mode {
+				if !im_io.WantCaptureKeyboard {
+					if event.key.scancode == .ESCAPE do break main_loop
+					if event.key.scancode == .U do set_ui_input_mode(!g.ui_input_mode)
+				}
+
+				if !g.ui_input_mode {
 					if event.key.scancode == .ESCAPE || event.key.scancode == .Q do break main_loop
 					g.key_down[event.key.scancode] = true
 				}
 			case .KEY_UP:
-				if !ui_input_mode {
+				if !g.ui_input_mode {
 					g.key_down[event.key.scancode] = false
 				}
 
 			case .MOUSE_MOTION:
-				if !ui_input_mode {
+				if !g.ui_input_mode {
 					g.mouse_move += {event.motion.xrel, event.motion.yrel}
 				}
 
 			case .MOUSE_BUTTON_DOWN:
 				if event.button.button == 2 {
-					ui_input_mode = !ui_input_mode
-					_ = sdl.SetWindowRelativeMouseMode(g.window, !ui_input_mode)
+					set_ui_input_mode(!g.ui_input_mode)
 				}
 			}
 
@@ -150,8 +157,7 @@ main :: proc() {
 		update_game(delta_time)
 
 		// Creamos un buffer de comandos, encargado de enviar ordenes a la GPU.
-		cmd_buf := sdl.AcquireGPUCommandBuffer(g.gpu)
-
+		cmd_buf := sdl.AcquireGPUCommandBuffer(g.gpu);sdl_assert(cmd_buf != nil)
 		swapchain_tex: ^sdl.GPUTexture
 		ok := sdl.WaitAndAcquireGPUSwapchainTexture(
 			cmd_buf,
@@ -183,8 +189,6 @@ main :: proc() {
 				sdl.EndGPURenderPass(im_render_pass)
 			}
 
-		} else {
-			log.debug("NOT RENDERING!")
 		}
 
 		ok = sdl.SubmitGPUCommandBuffer(cmd_buf);sdl_assert(ok)

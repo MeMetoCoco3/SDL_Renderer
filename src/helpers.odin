@@ -88,8 +88,10 @@ load_shader_info :: proc(shader_path: string) -> Shader_Info {
 }
 
 
-sdl_assert :: proc(ok: bool) {
-	if !ok do log.panicf("SDL Error: {}", sdl.GetError())
+sdl_assert :: proc(ok: bool, loc := #caller_location) {
+	if !ok {
+		log.warnf("Error on : {}, {}", loc, ok)
+		log.panicf("SDL Error: {}", sdl.GetError())}
 }
 
 sdl_log :: proc "c" (

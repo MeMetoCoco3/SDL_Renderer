@@ -19,6 +19,8 @@ MOUSE_SENSITIVITY :: 0.5
 
 UBO_Vert_Global :: struct #packed {
 	view_projection_mat: matrix[4, 4]f32,
+	inv_view_mat:        matrix[4, 4]f32,
+	inv_projection_mat:  matrix[4, 4]f32,
 }
 
 UBO_Vert_Local :: struct #packed {
@@ -92,12 +94,17 @@ Game_State :: struct {
 	light_color:          Vec3,
 	light_intensity:      f32,
 	ambient_light_color:  Vec3,
+	skybox_text:          ^sdl.GPUTexture,
+	skybox_text_single:   ^sdl.GPUTexture,
+	skybox_multi_image:   bool,
+	skybox_pipeline:      ^sdl.GPUGraphicsPipeline,
 }
 
 
 init_game :: proc() {
 	setup_pipeline()
 	setup_light_shape_pipeline()
+	setup_skybox_pipeline()
 
 	g.default_sampler = sdl.CreateGPUSampler(g.gpu, {min_filter = .LINEAR, mag_filter = .LINEAR})
 
@@ -110,6 +117,18 @@ init_game :: proc() {
 	odd_floor := load_texture_file(copy_pass, "odd_floor.png")
 	prototype_texture := load_texture_file(copy_pass, "texture_01.png")
 
+	g.skybox_text = load_cubemap_texture_files(
+		copy_pass,
+		{
+			.POSITIVEX = "skybox/ablaze/right.png",
+			.NEGATIVEX = "skybox/ablaze/left.png",
+			.POSITIVEY = "skybox/ablaze/top.png",
+			.NEGATIVEY = "skybox/ablaze/bottom.png",
+			.POSITIVEZ = "skybox/ablaze/front.png",
+			.NEGATIVEZ = "skybox/ablaze/back.png",
+		},
+	)
+	g.skybox_text_single = load_cubemap_texture_single(copy_pass, "skybox/blood/cubemap.png")
 
 	g.models = slice.clone(
 		[]Model {
@@ -140,25 +159,29 @@ init_game :: proc() {
 		},
 	)
 
-	g.entities = slice.clone(
-		[]Entity {
-			{model_id = 0, position = {-5, 0, 0}, rotation = 1}, // This rotation is equal to linalg.QUATERNIONF64_IDENTITY
-			{
-				model_id = 1,
-				position = {8, 0, 0},
-				rotation = linalg.quaternion_from_euler_angle_y_f32(15 * linalg.RAD_PER_DEG),
-			},
-			{model_id = 2, position = {0, -1, 0}, rotation = 0},
-			{model_id = 3, position = {0, 0.5, 4}, rotation = 0},
-		},
-	)
-
-
 	sdl.EndGPUCopyPass(copy_pass)
 	ok := sdl.SubmitGPUCommandBuffer(copy_cmd_buffer);sdl_assert(ok)
 
+	g.entities = slice.clone(
+	[]Entity {
+		{model_id = 0, position = {-5, 0, 0}, rotation = 1}, // This rotation is equal to linalg.QUATERNIONF64_IDENTITY
+		{
+			model_id = 1,
+			position = {8, 0, 0},
+			rotation = linalg.quaternion_from_euler_angle_y_f32(15 * linalg.RAD_PER_DEG),
+		},
+		{model_id = 2, position = {0, -1, 0}, rotation = 0},
+		{model_id = 3, position = {0, 0.5, 4}, rotation = 0},
+	},
+	)
 
 	g.rotate = true
+
+	g.camera = {
+		position = {0, EYE_HEIGHT, 10},
+		target   = {0, EYE_HEIGHT, 0},
+	}
+
 
 	g.light_color = {1, 1, 1}
 	g.light_position = {0, 4, 0}
@@ -171,6 +194,7 @@ update_game :: proc(dt: f32) {
 		im.Checkbox("Rotate", &g.rotate)
 		im.ColorEdit3("Ambient color", &g.ambient_light_color, {.Float})
 
+		im.Checkbox("Skybox multi_image", &g.skybox_multi_image)
 		im.SeparatorText("Light")
 		im.DragFloat3("Position", &g.light_position, 0.1, -10, 10)
 		im.DragFloat("Intensity", &g.light_intensity, 0.1, 0, 1000)
@@ -186,8 +210,6 @@ update_game :: proc(dt: f32) {
 
 			im.PopID()
 		}
-
-
 	}
 
 	im.End()
@@ -213,6 +235,8 @@ render_game :: proc(cmd_buf: ^sdl.GPUCommandBuffer, swapchain_tex: ^sdl.GPUTextu
 
 	ubo_vert_global := UBO_Vert_Global {
 		view_projection_mat = proj_mat * view_mat,
+		inv_view_mat        = linalg.inverse(view_mat),
+		inv_projection_mat  = linalg.inverse(proj_mat),
 	}
 	sdl.PushGPUVertexUniformData(cmd_buf, 0, rawptr(&ubo_vert_global), size_of(ubo_vert_global))
 
@@ -266,11 +290,8 @@ render_game :: proc(cmd_buf: ^sdl.GPUCommandBuffer, swapchain_tex: ^sdl.GPUTextu
 		sdl.DrawGPUIndexedPrimitives(render_pass, g.light_shape_mesh.num_indices, 1, 0, 0, 0)
 	}
 
-
 	sdl.BindGPUGraphicsPipeline(render_pass, g.object_pipeline)
-
 	for entity in g.entities {
-
 		model_mat := linalg.matrix4_from_trs_f32(entity.position, entity.rotation, {1, 1, 1})
 		normal_mat := linalg.inverse_transpose(model_mat)
 
@@ -280,10 +301,8 @@ render_game :: proc(cmd_buf: ^sdl.GPUCommandBuffer, swapchain_tex: ^sdl.GPUTextu
 		}
 		sdl.PushGPUVertexUniformData(cmd_buf, 1, rawptr(&ubo_vert_local), size_of(ubo_vert_local))
 
-
 		model := g.models[entity.model_id]
 		material := model.material
-
 		ubo_frag_local := UBO_Frag_Local {
 			material_specular_color     = material.specular_color,
 			material_specular_shininess = material.specular_shininess,
@@ -313,8 +332,59 @@ render_game :: proc(cmd_buf: ^sdl.GPUCommandBuffer, swapchain_tex: ^sdl.GPUTextu
 		)
 		sdl.DrawGPUIndexedPrimitives(render_pass, model.num_indices, 1, 0, 0, 0)
 	}
+
+
+	{
+
+		skybox_tex := g.skybox_multi_image ? g.skybox_text : g.skybox_text_single
+		sdl.BindGPUGraphicsPipeline(render_pass, g.skybox_pipeline)
+		log.info(skybox_tex)
+		sdl.BindGPUFragmentSamplers(
+			render_pass,
+			0,
+			&(sdl.GPUTextureSamplerBinding{texture = skybox_tex, sampler = g.default_sampler}),
+			1,
+		)
+		sdl.DrawGPUPrimitives(render_pass, 3, 1, 0, 0)
+	}
+
+
 	sdl.EndGPURenderPass(render_pass)
 
+
+}
+
+setup_skybox_pipeline :: proc() {
+	vertex_shader := load_shader(g.gpu, "skybox.vert")
+	fragment_shader := load_shader(g.gpu, "skybox.frag")
+
+
+	g.skybox_pipeline = sdl.CreateGPUGraphicsPipeline(
+		g.gpu,
+		{
+			vertex_shader = vertex_shader,
+			fragment_shader = fragment_shader,
+			primitive_type = .TRIANGLELIST,
+			depth_stencil_state = {
+				enable_depth_test = true,
+				enable_depth_write = false,
+				compare_op = .EQUAL,
+			},
+			rasterizer_state = {cull_mode = .BACK},
+			target_info = {
+				num_color_targets = 1,
+				color_target_descriptions = &(sdl.GPUColorTargetDescription {
+						format = sdl.GetGPUSwapchainTextureFormat(g.gpu, g.window),
+					}),
+				has_depth_stencil_target = true,
+				depth_stencil_format = g.depth_texture_format,
+			},
+		},
+	)
+	sdl_assert(g.object_pipeline != nil)
+	// Una vez hayamos hecho el binding con la pipeline, podemos liberarlos.
+	sdl.ReleaseGPUShader(g.gpu, vertex_shader)
+	sdl.ReleaseGPUShader(g.gpu, fragment_shader)
 
 }
 
@@ -358,7 +428,7 @@ setup_light_shape_pipeline :: proc() {
 		target_info = {
 			num_color_targets = 1,
 			color_target_descriptions = &(sdl.GPUColorTargetDescription {
-					format = sdl.GetGPUSwapchainTextureFormat(g.gpu, g.window),
+					format = g.swapchain_texture_format,
 				}),
 			has_depth_stencil_target = true,
 			depth_stencil_format = g.depth_texture_format,
@@ -416,7 +486,7 @@ setup_pipeline :: proc() {
 		target_info = {
 			num_color_targets = 1,
 			color_target_descriptions = &(sdl.GPUColorTargetDescription {
-					format = sdl.GetGPUSwapchainTextureFormat(g.gpu, g.window),
+					format = g.swapchain_texture_format,
 				}),
 			has_depth_stencil_target = true,
 			depth_stencil_format = g.depth_texture_format,
@@ -432,13 +502,14 @@ setup_pipeline :: proc() {
 update_camera :: proc(dt: f32) {
 	move_input: Vec2
 	if g.key_down[.W] do move_input.y = 1
-	if g.key_down[.S] do move_input.y = -1
+	else if g.key_down[.S] do move_input.y = -1
 	if g.key_down[.D] do move_input.x = 1
-	if g.key_down[.A] do move_input.x = -1
+	else if g.key_down[.A] do move_input.x = -1
 
 	look_input := g.mouse_move * MOUSE_SENSITIVITY
-	g.look.yaw = math.wrap(g.look.yaw + look_input.x, 360)
-	g.look.pitch = math.clamp(g.look.pitch + look_input.y, -89, 89)
+
+	g.look.yaw = math.wrap(g.look.yaw - look_input.x, 360)
+	g.look.pitch = math.clamp(g.look.pitch - look_input.y, -89, 89)
 
 	look_mat := linalg.matrix3_from_yaw_pitch_roll_f32(
 		linalg.to_radians(g.look.yaw),
@@ -446,10 +517,10 @@ update_camera :: proc(dt: f32) {
 		0,
 	)
 
-	forward := Vec3{0, 0, -1} * look_mat
-	right := Vec3{1, 0, 0} * look_mat
+	forward := look_mat * Vec3{0, 0, -1}
+	right := look_mat * Vec3{1, 0, 0}
 	move_dir := forward * move_input.y + right * move_input.x
-	// move_dir.y = 0
+	move_dir.y = 0
 
 	motion := linalg.normalize0(move_dir) * MOVE_SPEED * dt
 

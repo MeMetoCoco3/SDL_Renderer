@@ -20,6 +20,7 @@ Global :: struct {
 	window_size:              [2]i32,
 	key_down:                 #sparse[sdl.Scancode]bool,
 	mouse_move:               Vec2,
+	ui_input_mode:            bool,
 	using game:               Game_State,
 }
 
